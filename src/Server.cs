@@ -7,13 +7,18 @@ using SPTarkov.Common.Models.Logging;
 using SPTarkov.Server.Core.Controllers;
 using SPTarkov.Server.Core.DI;
 using SPTarkov.Server.Core.Generators.Bot;
+using SPTarkov.Server.Core.Helpers.Ragfair;
 using SPTarkov.Server.Core.Models.Common;
+using SPTarkov.Server.Core.Models.Eft.Common;
 using SPTarkov.Server.Core.Models.Eft.Common.Tables;
+using SPTarkov.Server.Core.Models.Eft.ItemEvent;
 using SPTarkov.Server.Core.Models.Eft.Match;
 using SPTarkov.Server.Core.Models.Eft.Ragfair;
+using SPTarkov.Server.Core.Models.Eft.Repair;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Mod;
 using SPTarkov.Server.Core.Models.Spt.Tables;
+using SPTarkov.Server.Core.Routers;
 using SPTarkov.Server.Core.Servers;
 using SPTarkov.Server.Core.Services.Commerce;
 using SPTarkov.Server.Core.Services.Ragfair;
@@ -26,13 +31,13 @@ public record Metadata : IModMetadata
     public string Name { get; init; } = "ComponentWear";
     public string Author { get; init; } = "Local";
     public List<string>? Contributors { get; init; }
-    public SemanticVersioning.Version Version { get; init; } = new("1.0.0");
+    public SemanticVersioning.Version Version { get; init; } = new("1.0.1");
     public SemanticVersioning.Range SptVersion { get; init; } = new("4.1.6");
     public bool HasPrepatcher { get; init; }
     public List<string>? Incompatibilities { get; init; }
     public Dictionary<string, SemanticVersioning.Range>? ModDependencies { get; init; }
     public string? Url { get; init; }
-    public string License { get; init; } = "UNLICENSED";
+    public string License { get; init; } = "MIT";
 }
 
 public sealed record ServerSettings
@@ -43,12 +48,13 @@ public sealed record ServerSettings
 }
 
 [Injectable(TypePriority = OnLoadOrder.RagfairCallbacks - 100)]
-public sealed class ServerLoad(TemplateTable templates, GlobalTable globals, SaveServer save,
+public sealed class ServerLoad(TemplateTable templates, GlobalTable globals, SaveServer save, EventOutputHolder eventOutput,
     ISptLogger<ServerLoad> logger) : IOnLoad
 {
     internal static readonly Dictionary<MongoId, PartKind> Parts = new();
     internal static ISptLogger<ServerLoad> Log = null!;
     internal static SaveServer Saves = null!;
+    internal static EventOutputHolder EventOutput = null!;
     internal static ServerSettings Settings = new();
     internal static string Journal = string.Empty;
 
@@ -56,6 +62,7 @@ public sealed class ServerLoad(TemplateTable templates, GlobalTable globals, Sav
     {
         Log = logger;
         Saves = save;
+        EventOutput = eventOutput;
         string directory = Path.GetDirectoryName(typeof(ServerLoad).Assembly.Location)!;
         string settings = Path.Combine(directory, "config.json");
         if (File.Exists(settings))
@@ -135,6 +142,123 @@ public sealed class ServerLoad(TemplateTable templates, GlobalTable globals, Sav
 }
 
 internal enum PartKind { None, Barrel, Upper, Suppressor, Muzzle }
+
+[HarmonyPatch]
+internal static class SkipFullPartRepairs
+{
+    [HarmonyPatch(typeof(RepairController), nameof(RepairController.RepairWithKit))]
+    [HarmonyPrefix]
+    private static bool Kit(MongoId __0, RepairActionDataRequest __1, PmcData __2,
+        ref ItemEventRouterResponse __result)
+    {
+        if (__1.Target is not MongoId target || FindFullPart(__2, target) is not Item part)
+            return true;
+
+        __result = ServerLoad.EventOutput.GetOutput(__0);
+        AddCurrentState(__result, __0, part, "kit");
+        return false;
+    }
+
+    [HarmonyPatch(typeof(RepairController), nameof(RepairController.TraderRepair))]
+    [HarmonyPrefix]
+    private static bool Trader(MongoId __0, ref TraderRepairActionDataRequest __1, PmcData __2,
+        ref ItemEventRouterResponse __result)
+    {
+        if (__1.RepairItems is not { Count: > 0 } requested)
+            return true;
+
+        var remaining = new List<RepairItem>(requested.Count);
+        ItemEventRouterResponse? output = null;
+        foreach (RepairItem entry in requested)
+        {
+            if (FindFullPart(__2, entry.Id) is Item part)
+            {
+                output ??= ServerLoad.EventOutput.GetOutput(__0);
+                AddCurrentState(output, __0, part, "trader");
+            }
+            else
+                remaining.Add(entry);
+        }
+
+        if (output == null)
+            return true;
+        if (remaining.Count > 0)
+        {
+            __1 = __1 with { RepairItems = remaining };
+            return true;
+        }
+
+        __result = output;
+        return false;
+    }
+
+    private static Item? FindFullPart(PmcData pmc, MongoId id)
+    {
+        Item? item = pmc.Inventory?.Items?.Find(candidate => candidate.Id == id);
+        return item != null && ServerLoad.Parts.ContainsKey(item.Template) &&
+            item.Upd?.Repairable is { Durability: double current, MaxDurability: double maximum } &&
+            current >= maximum ? item : null;
+    }
+
+    private static void AddCurrentState(ItemEventRouterResponse output, MongoId sessionId, Item part, string source)
+    {
+        // The item-event router initializes both collections before calling the controller.
+        var changedItems = output.ProfileChanges[sessionId].Items!.ChangedItems!;
+        if (!changedItems.Any(item => item.Id == part.Id))
+            changedItems.Add(part);
+
+        var state = part.Upd!.Repairable!;
+        ServerLoad.Log.Info($"[Component Wear] Repair skipped ({source}) {part.Id}: already at maximum " +
+            $"{state.Durability:0.###}/{state.MaxDurability:0.###}; returned current state.");
+    }
+}
+
+[HarmonyPatch(typeof(RepairHelper), nameof(RepairHelper.UpdateItemDurability))]
+internal static class PartRepairWear
+{
+    internal const double MinimumLoss = 0.10;
+
+    private static void Prefix(Item itemToRepair, TemplateItem itemToRepairDetails,
+        double amountToRepair, bool useRepairKit, bool applyMaxDurabilityDegradation,
+        out (double Current, double Maximum)? __state)
+    {
+        __state = null;
+        if (ServerLoad.Parts.ContainsKey(itemToRepairDetails.Id) &&
+            itemToRepair.Upd?.Repairable is { Durability: double current, MaxDurability: double maximum })
+        {
+            __state = (current, maximum);
+            ServerLoad.Log.Info($"[Component Wear] Repair requested ({(useRepairKit ? "kit" : "trader")}) " +
+                $"{itemToRepair.Id}: condition {current:0.###}/{maximum:0.###}, requested +{amountToRepair:0.###}, " +
+                $"native degradation enabled={applyMaxDurabilityDegradation}.");
+        }
+    }
+
+    [HarmonyPriority(Priority.Last)]
+    private static void Postfix(Item itemToRepair, bool useRepairKit,
+        (double Current, double Maximum)? __state)
+    {
+        if (__state is not { } before ||
+            itemToRepair.Upd?.Repairable is not { Durability: double current, MaxDurability: double maximum } state)
+            return;
+
+        if (current <= before.Current)
+        {
+            ServerLoad.Log.Info($"[Component Wear] Repair result ({(useRepairKit ? "kit" : "trader")}) " +
+                $"{itemToRepair.Id}: no condition restored; {current:0.###}/{maximum:0.###}.");
+            return;
+        }
+
+        // Preserve greater native degradation. Limit the minimum loss to the repair
+        // performed, so topping up a small amount cannot lower the current condition.
+        double minimumLoss = Math.Min(MinimumLoss, current - before.Current);
+        double ceiling = Math.Min(maximum, Math.Max(1, before.Maximum - minimumLoss));
+        state.MaxDurability = ceiling;
+        state.Durability = Math.Min(current, ceiling);
+        ServerLoad.Log.Info($"[Component Wear] Repair ({(useRepairKit ? "kit" : "trader")}) {itemToRepair.Id}: " +
+            $"{before.Current:0.###}/{before.Maximum:0.###} -> {state.Durability:0.###}/{ceiling:0.###}; " +
+            $"native result {current:0.###}/{maximum:0.###}; permanent loss {before.Maximum - ceiling:0.###}.");
+    }
+}
 
 [HarmonyPatch(typeof(RepairService), "GetKitDivisor")]
 internal static class PartKitPrice
@@ -285,3 +409,5 @@ internal static class RaidConditionSync
         return applied;
     }
 }
+
+

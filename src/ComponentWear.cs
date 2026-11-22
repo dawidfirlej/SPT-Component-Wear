@@ -10,11 +10,12 @@ using EFT;
 using EFT.InventoryLogic;
 using EFT.UI;
 using HarmonyLib;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
 namespace ComponentWear;
 
-[BepInPlugin("local.component.wear", "Component Wear", "1.0.0")]
+[BepInPlugin("local.component.wear", "Component Wear", "1.0.1")]
 public sealed class Plugin : BaseUnityPlugin
 {
     internal static ManualLogSource Log { get; private set; }
@@ -58,6 +59,7 @@ public sealed class Plugin : BaseUnityPlugin
         }
 
         TryPatch(() => harmony.CreateClassProcessor(typeof(ShowConditionInInspect)).Patch(), "Inspect bar");
+        TryPatch(() => harmony.CreateClassProcessor(typeof(ApplyPartConditionChanges)).Patch(), "live part condition");
         TryPatch(() => ApplySuppressorVolume.Install(harmony), "shot audio");
         TryPatch(() => harmony.CreateClassProcessor(typeof(PartMalfunctions)).Patch(), "part malfunctions");
         _pendingRepairHarmony = harmony;
@@ -247,7 +249,10 @@ internal static class ReadPartCondition
 {
     private static readonly Dictionary<string, (float Current, float Maximum)> Logged = new(StringComparer.Ordinal);
 
-    private static void Prefix(Item item, ref UnparsedData properties)
+    private static void Prefix(Item item, ref UnparsedData properties) =>
+        Apply(item, ref properties, liveUpdate: false);
+
+    internal static void Apply(Item item, ref UnparsedData properties, bool liveUpdate)
     {
         if (item is not Mod mod || !Wear.IsNativePart(mod) ||
             properties?.JToken is not JObject data || data["Repairable"] is not JObject condition)
@@ -259,8 +264,10 @@ internal static class ReadPartCondition
 
         // Vanilla discovers native components from declared fields on the item class.
         // Our repairable component is attached to Components, so apply it before handing off the other fields.
-        float maximum = ReadNumber(condition["MaxDurability"], component.MaxDurability);
-        float current = ReadNumber(condition["Durability"], component.Durability);
+        float previousMaximum = component.MaxDurability;
+        float previousCurrent = component.Durability;
+        float maximum = ReadNumber(condition["MaxDurability"], previousMaximum);
+        float current = ReadNumber(condition["Durability"], previousCurrent);
         component.MaxDurability = Math.Clamp(maximum, 1f, 100f);
         component.Durability = Math.Clamp(current, 0f, component.MaxDurability);
 
@@ -268,7 +275,17 @@ internal static class ReadPartCondition
         remaining.Remove("Repairable");
         properties = new UnparsedData { JToken = remaining };
 
-        if (Plugin.RaidConditions.TryGetState(mod.Id, out _))
+        if (liveUpdate)
+        {
+            if (previousCurrent != component.Durability || previousMaximum != component.MaxDurability)
+            {
+                mod.UpdateAttributes();
+                Plugin.Log.LogInfo($"[Condition] Applied server item update {mod.Id}: " +
+                    $"{previousCurrent:0.###}/{previousMaximum:0.###} -> " +
+                    $"{component.Durability:0.###}/{component.MaxDurability:0.###}.");
+            }
+        }
+        else if (Plugin.RaidConditions.TryGetState(mod.Id, out _))
         {
             var loaded = (component.Durability, component.MaxDurability);
             if (!Logged.TryGetValue(mod.Id, out var previous) || previous != loaded)
@@ -286,6 +303,31 @@ internal static class ReadPartCondition
 
         float value = token.Value<float>();
         return float.IsNaN(value) || float.IsInfinity(value) ? fallback : value;
+    }
+}
+
+[HarmonyPatch(typeof(ProfileUpdatesHandler), nameof(ProfileUpdatesHandler.ManageChangedItems))]
+internal static class ApplyPartConditionChanges
+{
+    private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
+    {
+        var code = instructions.ToList();
+        MethodInfo parse = AccessTools.Method(typeof(JsonExtensions), nameof(JsonExtensions.ParseJsonTo),
+            new[] { typeof(UnparsedData), typeof(Type), typeof(object), typeof(JsonConverter[]) });
+        var calls = code.Where(instruction => instruction.Calls(parse)).ToList();
+        if (calls.Count != 1)
+            throw new InvalidOperationException($"Expected one changed-item JSON update, found {calls.Count}.");
+
+        calls[0].operand = AccessTools.Method(typeof(ApplyPartConditionChanges), nameof(ParseChangedItem));
+        return code;
+    }
+
+    private static object ParseChangedItem(UnparsedData data, Type type, object target, JsonConverter[] converters)
+    {
+        if (target is Item item)
+            ReadPartCondition.Apply(item, ref data, liveUpdate: true);
+
+        return JsonExtensions.ParseJsonTo(data, type, target, converters);
     }
 }
 
@@ -696,3 +738,5 @@ internal static class NoPartRepairBuffs
         return false;
     }
 }
+
+
