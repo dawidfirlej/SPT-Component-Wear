@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <SptRoot Condition="&apos;$(SptRoot)&apos; == &apos;&apos;">$(MSBuildProjectDirectory)/../..</SptRoot>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <DisableImplicitFrameworkReferences>true</DisableImplicitFrameworkReferences>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>ComponentWear</AssemblyName>
+    <Version>1.0.0</Version>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="ComponentWear.cs" />
+    <Compile Include="ConditionStore.cs" />
+    <Reference Include="0Harmony"><HintPath>$(SptRoot)/BepInEx/core/0Harmony.dll</HintPath><Private>false</Private></Reference>
+    
+    <Reference Include="mscorlib"><HintPath>$(SptRoot)/EscapeFromTarkov_Data/Managed/mscorlib.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="System"><HintPath>$(SptRoot)/EscapeFromTarkov_Data/Managed/System.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="System.Core"><HintPath>$(SptRoot)/EscapeFromTarkov_Data/Managed/System.Core.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="netstandard"><HintPath>$(SptRoot)/EscapeFromTarkov_Data/Managed/netstandard.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Assembly-CSharp"><HintPath>$(SptRoot)/EscapeFromTarkov_Data/Managed/Assembly-CSharp.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Comfort"><HintPath>$(SptRoot)/EscapeFromTarkov_Data/Managed/Comfort.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Comfort.Unity"><HintPath>$(SptRoot)/EscapeFromTarkov_Data/Managed/Comfort.Unity.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine"><HintPath>$(SptRoot)/EscapeFromTarkov_Data/Managed/UnityEngine.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.CoreModule"><HintPath>$(SptRoot)/EscapeFromTarkov_Data/Managed/UnityEngine.CoreModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="BepInEx"><HintPath>$(SptRoot)/BepInEx/core/BepInEx.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="ItemComponent.Types"><HintPath>$(SptRoot)/EscapeFromTarkov_Data/Managed/ItemComponent.Types.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Sirenix.Serialization"><HintPath>$(SptRoot)/EscapeFromTarkov_Data/Managed/Sirenix.Serialization.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Newtonsoft.Json"><HintPath>$(SptRoot)/EscapeFromTarkov_Data/Managed/Newtonsoft.Json.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+</Project>

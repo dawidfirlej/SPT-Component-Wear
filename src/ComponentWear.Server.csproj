@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <SptRoot Condition="&apos;$(SptRoot)&apos; == &apos;&apos;">$(MSBuildProjectDirectory)/../..</SptRoot>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>ComponentWear.Server</AssemblyName>
+    <Version>1.0.0</Version>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Server.cs" />
+    <Compile Include="ConditionStore.cs" />
+    <Reference Include="SPTarkov.Server.Core"><HintPath>$(SptRoot)/SPT_Runtime/SPTarkov.Server.Core.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="SPTarkov.DI"><HintPath>$(SptRoot)/SPT_Runtime/SPTarkov.DI.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="SPTarkov.Common"><HintPath>$(SptRoot)/SPT_Runtime/SPTarkov.Common.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="SemanticVersioning"><HintPath>$(SptRoot)/SPT_Runtime/SemanticVersioning.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="0Harmony"><HintPath>$(SptRoot)/SPT_Runtime/0Harmony.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+</Project>
