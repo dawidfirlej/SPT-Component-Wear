@@ -2,15 +2,17 @@
 
 Component Wear gives replaceable barrels, upper receivers, and muzzle devices their own condition. A part keeps its wear when moved between compatible weapons.
 
-**Version 1.0.0 targets SPT 4.1.6.** Install both the included client and server modules. No other mods are required.
+**Version 1.0.1 targets SPT 4.1.6.** Install both the included client and server modules. No other mods are required.
 
 ## Installation
 
 1. Close the game and server and back up your SPT profiles.
-2. Extract [ComponentWear-1.0.0.zip](https://github.com/dawidfirlej/SPT-Component-Wear/releases/download/v1.0.0/ComponentWear-1.0.0.zip) into the SPT installation folder, merging the `BepInEx` and `SPT_Runtime` directories.
+2. Extract [ComponentWear-1.0.1.zip](https://github.com/dawidfirlej/SPT-Component-Wear/releases/download/v1.0.1/ComponentWear-1.0.1.zip) into the SPT installation folder, merging the `BepInEx` and `SPT_Runtime` directories.
 3. Start the server and then the game. Inspect a supported part to see its condition bar.
 
 Existing parts with no saved condition start at 100/100. Keep your existing `BepInEx/config/local.component.wear.cfg` and server `config.json` when upgrading if you have customized them.
+
+The 1.0.1 update refreshes part condition immediately after repair. Repeated repair requests for a part already at its maximum are skipped.
 
 ## Mechanics
 
