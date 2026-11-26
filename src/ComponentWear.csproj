@@ -5,12 +5,14 @@
     <DisableImplicitFrameworkReferences>true</DisableImplicitFrameworkReferences>
     <LangVersion>latest</LangVersion>
     <AssemblyName>ComponentWear</AssemblyName>
-    <Version>1.0.1</Version>
+    <Version>1.1.2</Version>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="ComponentWear.cs" />
     <Compile Include="ConditionStore.cs" />
+    <Compile Include="ClientSettings.cs" />
+    <Compile Include="ExtraParts.cs" />
     <Reference Include="0Harmony"><HintPath>$(SptRoot)/BepInEx/core/0Harmony.dll</HintPath><Private>false</Private></Reference>
     
     <Reference Include="mscorlib"><HintPath>$(SptRoot)/EscapeFromTarkov_Data/Managed/mscorlib.dll</HintPath><Private>false</Private></Reference>

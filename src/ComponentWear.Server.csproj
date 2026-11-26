@@ -3,7 +3,7 @@
     <SptRoot Condition="&apos;$(SptRoot)&apos; == &apos;&apos;">$(MSBuildProjectDirectory)/../..</SptRoot>
     <TargetFramework>net10.0</TargetFramework>
     <AssemblyName>ComponentWear.Server</AssemblyName>
-    <Version>1.0.1</Version>
+    <Version>1.1.2</Version>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
@@ -11,6 +11,7 @@
   <ItemGroup>
     <Compile Include="Server.cs" />
     <Compile Include="ConditionStore.cs" />
+    <Compile Include="ExtraParts.cs" />
     <Reference Include="SPTarkov.Server.Core"><HintPath>$(SptRoot)/SPT_Runtime/SPTarkov.Server.Core.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="SPTarkov.DI"><HintPath>$(SptRoot)/SPT_Runtime/SPTarkov.DI.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="SPTarkov.Common"><HintPath>$(SptRoot)/SPT_Runtime/SPTarkov.Common.dll</HintPath><Private>false</Private></Reference>

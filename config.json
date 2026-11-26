@@ -1,0 +1,26 @@
+{
+  "UsedFleaParts": true,
+  "UsedOfferChance": 0.25,
+  "BotPartCondition": true,
+  "ExtraCategories": {
+    "Magazines": false,
+    "GasBlocks": false,
+    "ChargingHandles": false,
+    "OtherReceivers": false,
+    "UnderbarrelLaunchers": false,
+    "Handguards": false,
+    "Stocks": false,
+    "PistolGrips": false,
+    "Foregrips": false,
+    "Bipods": false,
+    "IronSights": false,
+    "Optics": false,
+    "TacticalDevices": false,
+    "Mounts": false,
+    "AuxiliaryParts": false
+  },
+  "ExtraUsedFleaParts": true,
+  "ExtraUsedOfferChance": 0.25,
+  "ExtraBotPartCondition": true,
+  "ExtraBotWearChance": 0.65
+}

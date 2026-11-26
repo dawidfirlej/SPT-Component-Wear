@@ -4,9 +4,12 @@ using System.Linq;
 using System.IO;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Runtime.CompilerServices;
 using BepInEx;
 using BepInEx.Logging;
 using EFT;
+using EFT.Animations;
+using EFT.Animations.NewRecoil;
 using EFT.InventoryLogic;
 using EFT.UI;
 using HarmonyLib;
@@ -15,12 +18,11 @@ using Newtonsoft.Json.Linq;
 
 namespace ComponentWear;
 
-[BepInPlugin("local.component.wear", "Component Wear", "1.0.1")]
+[BepInPlugin("local.component.wear", "Component Wear", "1.1.2")]
 public sealed class Plugin : BaseUnityPlugin
 {
     internal static ManualLogSource Log { get; private set; }
 
-    internal static ConditionStore Conditions { get; private set; }
     internal static ConditionStore RaidConditions { get; private set; }
     private float _nextFlush;
     private static bool _loggedSave;
@@ -29,20 +31,12 @@ public sealed class Plugin : BaseUnityPlugin
     private void Awake()
     {
         Log = Logger;
-        if (!Config.Bind("Prototype", "Enabled", false,
-                "Enable the prototype for the explicitly listed test items.").Value)
-            return;
-
-        string entries = Config.Bind("Prototype", "TestItems", string.Empty,
-            "Comma-separated test item IDs and starting condition, as id:condition.").Value;
-        Wear.LoadTestItems(entries);
-
+        TryPatch(() => ClientSettings.Bind(Config, BepInEx.Paths.GameRootPath), "settings");
         var harmony = new Harmony("local.component.wear");
         try
         {
-            Conditions = new ConditionStore(Path.Combine(BepInEx.Paths.ConfigPath, "local.component.wear.condition"));
             RaidConditions = new ConditionStore(Path.Combine(BepInEx.Paths.ConfigPath, "local.component.wear.raid"));
-            Logger.LogInfo($"[Save] Loaded {Conditions.Count} legacy and {RaidConditions.Count} raid conditions.");
+            Logger.LogInfo($"[Save] Loaded {RaidConditions.Count} raid conditions.");
             harmony.CreateClassProcessor(typeof(AddRepairableComponent)).Patch();
             harmony.CreateClassProcessor(typeof(ReadPartCondition)).Patch();
             harmony.CreateClassProcessor(typeof(WritePartCondition)).Patch();
@@ -62,8 +56,11 @@ public sealed class Plugin : BaseUnityPlugin
         TryPatch(() => harmony.CreateClassProcessor(typeof(ApplyPartConditionChanges)).Patch(), "live part condition");
         TryPatch(() => ApplySuppressorVolume.Install(harmony), "shot audio");
         TryPatch(() => harmony.CreateClassProcessor(typeof(PartMalfunctions)).Patch(), "part malfunctions");
+        TryPatch(() => harmony.CreateClassProcessor(typeof(OptionalPartEffects)).Patch(), "optional part bonuses");
+        TryPatch(() => harmony.CreateClassProcessor(typeof(WornBipodRecoil)).Patch(), "deployed bipod wear");
+        TryPatch(() => harmony.CreateClassProcessor(typeof(LauncherWear)).Patch(), "launcher wear");
         _pendingRepairHarmony = harmony;
-        Logger.LogInfo($"Ready for server-registered part templates; {Wear.TestItemCount} legacy test IDs.");
+        Logger.LogInfo("Ready for server-registered part templates.");
     }
 
     internal static void TryPatch(Action patch, string feature)
@@ -81,7 +78,7 @@ public sealed class Plugin : BaseUnityPlugin
     private void Update()
     {
         InstallRepairPatchesWhenReady();
-        if ((Conditions?.IsDirty != true && RaidConditions?.IsDirty != true) || UnityEngine.Time.unscaledTime < _nextFlush)
+        if (RaidConditions?.IsDirty != true || UnityEngine.Time.unscaledTime < _nextFlush)
             return;
 
         _nextFlush = UnityEngine.Time.unscaledTime + 1f;
@@ -113,17 +110,16 @@ public sealed class Plugin : BaseUnityPlugin
 
     private static void FlushConditions()
     {
-        if (Conditions?.IsDirty != true && RaidConditions?.IsDirty != true)
+        if (RaidConditions?.IsDirty != true)
             return;
 
         try
         {
-            Conditions.Flush();
             RaidConditions.Flush();
             if (!_loggedSave)
             {
                 _loggedSave = true;
-                Log.LogInfo($"[Save] Committed {Conditions.Count} legacy and {RaidConditions.Count} raid conditions.");
+                Log.LogInfo($"[Save] Committed {RaidConditions.Count} raid conditions.");
             }
         }
         catch (IOException exception)
@@ -139,38 +135,22 @@ public sealed class Plugin : BaseUnityPlugin
 
 internal enum Part
 {
-    None, Barrel, Upper, Suppressor, FlashHider, MuzzleDevice
+    None, Barrel, Upper, Suppressor, FlashHider, MuzzleDevice, Extended
 }
 
 internal static class Wear
 {
-    private static readonly Dictionary<string, int> TestItems = new(StringComparer.Ordinal);
-
-    internal static int TestItemCount => TestItems.Count;
-
-    internal static void LoadTestItems(string entries)
-    {
-        foreach (string entry in entries.Split(','))
-        {
-            string[] pair = entry.Trim().Split(':');
-            if (pair.Length == 2 && pair[0].Length == 24 && pair[0].All(Uri.IsHexDigit)
-                && int.TryParse(pair[1], out int condition) && condition >= 0 && condition <= 100)
-                TestItems[pair[0]] = condition;
-        }
-
-    }
-
-    internal static bool TryGetTestCondition(Mod mod, out int condition) =>
-        TestItems.TryGetValue(mod.Id.ToString(), out condition);
+    internal static bool HasExpandedParts { get; set; }
 
     internal const int RepairMarker = 23;
 
-    internal static bool IsNativePart(Mod mod) => mod.RepairSpeed == RepairMarker && Classify(mod) != Part.None;
-
-    internal static bool Tracks(Mod mod) => IsNativePart(mod) || TryGetTestCondition(mod, out _);
+    internal static bool IsNativePart(Mod mod) =>
+        ExtraParts.Decode(mod.RepairSpeed) != ExtraPart.None ||
+        mod.RepairSpeed == RepairMarker && Classify(mod) != Part.None;
 
     internal static Part Classify(Mod mod) => mod switch
     {
+        _ when ExtraParts.Decode(mod.RepairSpeed) != ExtraPart.None => Part.Extended,
         Barrel => Part.Barrel,
         Silencer => Part.Suppressor,
         FlashHider => Part.FlashHider,
@@ -188,7 +168,7 @@ internal static class Wear
         float loss = 0f;
         foreach (Mod mod in weapon.Mods)
         {
-            if (Tracks(mod) && Classify(mod) == part &&
+            if (IsNativePart(mod) && Classify(mod) == part &&
                 mod.TryGetItemComponent(out RepairableComponent component))
                 loss = Math.Max(loss, LossFraction(component));
         }
@@ -197,49 +177,43 @@ internal static class Wear
 
     internal sealed class Template : IRepairableComponentTemplate
     {
-        internal static readonly Template Instance = new();
+        internal static readonly Template Standard = new(0.03f, 0.025f);
+        internal static readonly Template Expanded = new(ExtraParts.TraderDegradation, ExtraParts.KitDegradation);
+
+        private Template(float traderDegradation, float kitDegradation)
+        {
+            MaxRepairDegradation = traderDegradation;
+            MaxRepairKitDegradation = kitDegradation;
+        }
+
         public int Durability => 100;
         public int MaxDurability => 100;
         public float MinRepairDegradation => 0f;
-        public float MaxRepairDegradation => 0.03f;
+        public float MaxRepairDegradation { get; }
         public float MinRepairKitDegradation => 0f;
-        public float MaxRepairKitDegradation => 0.025f;
+        public float MaxRepairKitDegradation { get; }
     }
 }
 
 [HarmonyPatch(typeof(Mod), MethodType.Constructor, typeof(string), typeof(ModTemplate))]
 internal static class AddRepairableComponent
 {
-    private static void Postfix(Mod __instance) => Ensure(__instance, "constructor");
+    private static void Postfix(Mod __instance) => Ensure(__instance);
 
-    internal static RepairableComponent Ensure(Mod mod, string source)
+    internal static RepairableComponent Ensure(Mod mod)
     {
-        bool native = Wear.IsNativePart(mod);
-        bool test = Wear.TryGetTestCondition(mod, out int condition);
-        if (!native && !test)
+        if (!Wear.IsNativePart(mod))
             return null;
 
         if (mod.TryGetItemComponent(out RepairableComponent existing))
             return existing;
 
         Part part = Wear.Classify(mod);
-        if (part == Part.None)
-        {
-            Plugin.Log.LogWarning($"[{source}] Unrecognized test part {mod.Id}, template={mod.StringTemplateId}, type={mod.GetType().Name}.");
-            return null;
-        }
-
-        var component = new RepairableComponent(mod, Wear.Template.Instance);
-        bool restored = false;
-        if (!native)
-        {
-            restored = Plugin.Conditions.TryGetState(mod.Id, out PartCondition persisted);
-            component.Durability = restored ? persisted.Current : condition;
-            component.MaxDurability = restored ? persisted.Maximum : 100f;
-        }
+        var template = part == Part.Extended ? Wear.Template.Expanded : Wear.Template.Standard;
+        if (part == Part.Extended)
+            Wear.HasExpandedParts = true;
+        var component = new RepairableComponent(mod, template);
         mod.Components.Add(component);
-        if (test)
-            Plugin.Log.LogInfo($"[{source}] Added {part} {mod.Id} at {component.Durability:0.###}/{component.MaxDurability:0.###} (native={native}, legacy restored={restored}).");
         return component;
     }
 }
@@ -258,7 +232,7 @@ internal static class ReadPartCondition
             properties?.JToken is not JObject data || data["Repairable"] is not JObject condition)
             return;
 
-        RepairableComponent component = AddRepairableComponent.Ensure(mod, "native upd");
+        RepairableComponent component = AddRepairableComponent.Ensure(mod);
         if (component == null)
             return;
 
@@ -353,11 +327,11 @@ internal static class ShowConditionInInspect
     private static void Postfix(ItemSpecificationPanel __instance, Item ____item,
         CharacteristicPanel ____charDurability, SimpleTooltip ____secondaryTooltip)
     {
-        if (____item is not Mod mod || !Wear.Tracks(mod) ||
+        if (____item is not Mod mod || !Wear.IsNativePart(mod) ||
             !__instance.Examined || ____charDurability == null)
             return;
 
-        RepairableComponent component = AddRepairableComponent.Ensure(mod, "inspect fallback");
+        RepairableComponent component = AddRepairableComponent.Ensure(mod);
         if (component == null)
             return;
 
@@ -380,7 +354,7 @@ internal static class ShowConditionInInspect
 [HarmonyPatch(typeof(Weapon), nameof(Weapon.OnShot))]
 internal static class WearOnShot
 {
-    private static readonly Dictionary<string, int> ShotCounts = new(StringComparer.Ordinal);
+    private static readonly HashSet<ExtraPart> LoggedExpandedWear = new();
 
     private static readonly Random HeatRandom = new();
 
@@ -391,7 +365,7 @@ internal static class WearOnShot
         float skillWeaponTreatmentFactor, GlobalConfiguration.OverheatSettings overheatSettings, float __state)
     {
 
-        if (!__instance.Mods.Any(mod => Wear.Tracks(mod)))
+        if (!__instance.Mods.Any(Wear.IsNativePart))
             return;
 
         float heat = __instance.MalfState.LastShotOverheat;
@@ -419,12 +393,9 @@ internal static class WearOnShot
         }
         float wearFloor = Math.Clamp(overheatSettings.OverheatWearLimit * 100f, 1f, 100f);
 
-        ShotCounts.TryGetValue(__instance.Id, out int shots);
-        ShotCounts[__instance.Id] = ++shots;
-        bool logShot = shots == 1 || shots % 30 == 0;
         foreach (Mod mod in __instance.Mods)
         {
-            if (!Wear.Tracks(mod))
+            if (!Wear.IsNativePart(mod))
                 continue;
 
             float rate = Wear.Classify(mod) switch
@@ -434,25 +405,169 @@ internal static class WearOnShot
                 Part.Suppressor => 0.55f,
                 Part.FlashHider => 0.25f,
                 Part.MuzzleDevice => 0.25f,
+                Part.Extended => ExtraParts.ShotRate(ExtraParts.Decode(mod.RepairSpeed)),
                 _ => 0f
             };
             if (rate > 0f && mod.TryGetItemComponent(out RepairableComponent component))
-            {
-                float before = component.Durability;
-                float beforeMax = component.MaxDurability;
-                component.Durability = Math.Max(0f, before - shotWear * rate);
-                float loss = maxLoss * rate;
-                if (loss > 0f && beforeMax > wearFloor && component.Durability < beforeMax - loss)
-                    component.MaxDurability = Math.Max(wearFloor, beforeMax - loss);
-                component.Durability = Math.Min(component.Durability, component.MaxDurability);
-
-                bool native = Wear.IsNativePart(mod);
-                (native ? Plugin.RaidConditions : Plugin.Conditions)
-                    .Record(mod.Id, component.Durability, component.MaxDurability);
-                if (logShot && Wear.TryGetTestCondition(mod, out _))
-                    Plugin.Log.LogInfo($"[Shot {shots}] {Wear.Classify(mod)} {mod.Id}: {before:0.000}/{beforeMax:0.000} -> {component.Durability:0.000}/{component.MaxDurability:0.000}, heat {heat:0.0}.");
-            }
+                Apply(mod, component, shotWear * rate, maxLoss * rate, wearFloor);
         }
+    }
+
+    internal static void Apply(Mod mod, RepairableComponent component, float wear, float maxLoss, float wearFloor)
+    {
+        float previous = component.Durability;
+        float previousMax = component.MaxDurability;
+        float current = Math.Max(0f, previous - wear);
+        float maximum = previousMax;
+        if (maxLoss > 0f && maximum > wearFloor && current < maximum - maxLoss)
+            maximum = Math.Max(wearFloor, maximum - maxLoss);
+        current = Math.Min(current, maximum);
+        if (current == previous && maximum == previousMax)
+            return;
+
+        component.MaxDurability = maximum;
+        component.Durability = current;
+        Plugin.RaidConditions.Record(mod.Id, current, maximum);
+        ExtraPart extra = ExtraParts.Decode(mod.RepairSpeed);
+        if (extra != ExtraPart.None && LoggedExpandedWear.Add(extra))
+            Plugin.Log.LogInfo($"[Wear] {extra} {mod.Id}: {previous:0.####}/{previousMax:0.####} -> " +
+                $"{current:0.####}/{maximum:0.####}.");
+    }
+}
+
+[HarmonyPatch(typeof(Player.FirearmController), "LauncherShot")]
+internal static class LauncherWear
+{
+    private static void Postfix(Player.FirearmController __instance, Launcher launcher, Ammo ammo)
+    {
+        if (ExtraParts.Decode(launcher.RepairSpeed) != ExtraPart.UnderbarrelLaunchers ||
+            !launcher.TryGetItemComponent(out RepairableComponent component))
+            return;
+
+        float shotWear = __instance.Item.GetDurabilityLossOnShot(ammo.AmmoTemplate.DurabilityBurnModificator,
+            1f, 0f, out _);
+        if (shotWear > 0f && !float.IsInfinity(shotWear))
+            WearOnShot.Apply(launcher, component, shotWear * ExtraParts.LauncherShotRate, 0f, 1f);
+    }
+}
+
+[HarmonyPatch]
+internal static class OptionalPartEffects
+{
+    private const float MaximumBonusLoss = 0.20f;
+
+    internal static float BonusLoss(Mod mod) =>
+        ExtraParts.Decode(mod.RepairSpeed) != ExtraPart.None &&
+        mod.TryGetItemComponent(out RepairableComponent component)
+            ? Wear.LossFraction(component) * MaximumBonusLoss : 0f;
+
+    [HarmonyPatch(typeof(Weapon), "get_ErgonomicsDelta")]
+    [HarmonyPostfix]
+    private static void Ergonomics(Weapon __instance, ref float __result)
+    {
+        if (!Wear.HasExpandedParts)
+            return;
+        float lost = 0f;
+        foreach (Mod mod in __instance.Mods)
+            lost += Math.Max(0f, mod.Template.Ergonomics) * BonusLoss(mod);
+        __result -= Math.Min(lost, 5f) / Math.Max(1f, __instance.Template.Ergonomics);
+    }
+
+    [HarmonyPatch(typeof(Weapon), "get_RecoilDelta")]
+    [HarmonyPostfix]
+    private static void Recoil(Weapon __instance, ref float __result)
+    {
+        if (!Wear.HasExpandedParts)
+            return;
+        float lost = 0f;
+        bool folded = __instance.Folded;
+        foreach (Mod mod in __instance.Mods)
+            if (!folded || mod is not Stock)
+                lost += Math.Max(0f, -mod.Template.Recoil) * BonusLoss(mod);
+        __result += Math.Min(lost, 2.5f) / 100f;
+    }
+
+    [HarmonyPatch(typeof(Weapon), "get_CenterOfImpactDelta")]
+    [HarmonyPostfix]
+    private static void Accuracy(Weapon __instance, ref float __result)
+    {
+        if (!Wear.HasExpandedParts)
+            return;
+        float lost = 0f;
+        foreach (Mod mod in __instance.Mods)
+            lost += Math.Max(0, mod.Accuracy) * BonusLoss(mod);
+        __result += Math.Min(lost, 2f) / 100f;
+    }
+
+    [HarmonyPatch(typeof(Weapon), nameof(Weapon.GetShotOverheat))]
+    [HarmonyPostfix]
+    private static void Heat(Weapon __instance, ref float modsHeatFactor, ref float __result)
+    {
+        if (!Wear.HasExpandedParts)
+            return;
+        float multiplier = 1f;
+        foreach (Mod mod in __instance.Mods)
+        {
+            float loss = BonusLoss(mod);
+            float factor = mod.HeatFactor;
+            if (loss > 0f && factor > 0f && factor < 1f)
+                multiplier *= 1f + (1f - factor) * loss / factor;
+        }
+        multiplier = Math.Min(multiplier, 1.02f);
+        modsHeatFactor *= multiplier;
+        __result *= multiplier;
+    }
+
+    [HarmonyPatch(typeof(Magazine), "get_LoadUnloadModifier")]
+    [HarmonyPostfix]
+    private static void LoadTime(Magazine __instance, ref float __result)
+    {
+        if (__result < 0f)
+            __result *= 1f - BonusLoss(__instance);
+    }
+
+    [HarmonyPatch(typeof(Magazine), "get_CheckTimeModifier")]
+    [HarmonyPostfix]
+    private static void CheckTime(Magazine __instance, ref float __result) =>
+        LoadTime(__instance, ref __result);
+
+    [HarmonyPatch(typeof(NewRecoilShotEffect), "RecalculateRecoilParamsOnChangeWeapon")]
+    [HarmonyPostfix]
+    private static void SetBipod(NewRecoilShotEffect __instance, Player.FirearmController firearmController) =>
+        WornBipodRecoil.SetBipod(__instance.HandRotationRecoil, firearmController?.Bipod);
+}
+
+[HarmonyPatch(typeof(NewRotationRecoilProcess), "AddAccelerationLimitless")]
+internal static class WornBipodRecoil
+{
+    private static readonly ConditionalWeakTable<NewRotationRecoilProcess, Bipod> Bipods = new();
+
+    internal static void SetBipod(NewRotationRecoilProcess process, Bipod bipod)
+    {
+        Bipods.Remove(process);
+        if (bipod != null && ExtraParts.Decode(bipod.RepairSpeed) == ExtraPart.Bipods)
+            Bipods.Add(process, bipod);
+    }
+
+    private static void Prefix(NewRotationRecoilProcess __instance, bool ____bipodMode, out float? __state)
+    {
+        __state = null;
+        if (!____bipodMode || !Bipods.TryGetValue(__instance, out Bipod bipod))
+            return;
+
+        float current = __instance.BipodRecoilMultiplier;
+        if (current >= 0f && current < 1f)
+        {
+            __state = current;
+            __instance.BipodRecoilMultiplier = current + (1f - current) * OptionalPartEffects.BonusLoss(bipod);
+        }
+    }
+
+    private static Exception Finalizer(NewRotationRecoilProcess __instance, float? __state, Exception __exception)
+    {
+        if (__state.HasValue)
+            __instance.BipodRecoilMultiplier = __state.Value;
+        return __exception;
     }
 }
 
@@ -486,7 +601,7 @@ internal static class PartBalance
         float lost = 0f;
         foreach (Mod mod in weapon.Mods)
         {
-            if (mod is not MuzzleMod || !Wear.Tracks(mod) ||
+            if (mod is not MuzzleMod || !Wear.IsNativePart(mod) ||
                 !mod.TryGetItemComponent(out RepairableComponent component))
                 continue;
 
@@ -514,13 +629,13 @@ internal static class MuzzleRecoil
 [HarmonyPatch(typeof(Player.FirearmController), nameof(Player.FirearmController.GetTotalMalfunctionChance))]
 internal static class PartMalfunctions
 {
-    private static readonly HashSet<string> LoggedWeapons = new(StringComparer.Ordinal);
+    private static bool _loggedExtraChance;
 
     private static void Postfix(Player.FirearmController __instance, ref double durabilityMalfChance,
         ref float weaponDurability, ref float __result)
     {
         Weapon weapon = __instance.Item;
-        if (!weapon.AllowMalfunction || !weapon.Mods.Any(mod => Wear.Tracks(mod)))
+        if (!weapon.AllowMalfunction || !weapon.Mods.Any(Wear.IsNativePart))
             return;
 
         float upper = Wear.WorstLoss(weapon, Part.Upper);
@@ -532,9 +647,11 @@ internal static class PartMalfunctions
         __result = Math.Min(1f, previous + extra);
         durabilityMalfChance += __result - previous;
 
-        if (weapon.Mods.Any(mod => Wear.TryGetTestCondition(mod, out _)) &&
-            LoggedWeapons.Add(weapon.Id + (extra > 0f ? ":extra" : ":baseline")))
+        if (!_loggedExtraChance && __result > previous)
+        {
+            _loggedExtraChance = true;
             Plugin.Log.LogInfo($"[Malfunction] {weapon.Id}: base condition {weaponDurability:0.##}, upper wear {upper:P1}, barrel wear {barrel:P1}, probability {previous:P3} -> {__result:P3}.");
+        }
     }
 }
 
@@ -542,7 +659,7 @@ internal static class ApplySuppressorVolume
 {
     private static readonly AccessTools.FieldRef<BaseSoundPlayer, BaseSoundPlayer.IObserverToPlayerBridge>
         Bridge = AccessTools.FieldRefAccess<BaseSoundPlayer, BaseSoundPlayer.IObserverToPlayerBridge>("playersBridge");
-    private static readonly HashSet<string> LoggedAudioWeapons = new(StringComparer.Ordinal);
+    private static readonly HashSet<string> LoggedAudioPaths = new(StringComparer.Ordinal);
 
     internal static void Install(Harmony harmony)
     {
@@ -641,7 +758,7 @@ internal static class ApplySuppressorVolume
             !CanPlayUnattenuated(player, multiShot, loss))
             return true;
 
-        if (Wear.TryGetTestCondition(mod, out _) && LoggedAudioWeapons.Add("SEB Live dry:" + mod.Id))
+        if (LoggedAudioPaths.Add("SEB Live dry"))
             Plugin.Log.LogInfo($"[Audio] SEB Live {mod.Id}: suppressor wear {loss:P1}; selected unsuppressed shot bank.");
         return false;
     }
@@ -658,7 +775,7 @@ internal static class ApplySuppressorVolume
 
         foreach (Mod mod in weapon.Mods)
         {
-            if (mod is not Silencer || !Wear.Tracks(mod) ||
+            if (mod is not Silencer || !Wear.IsNativePart(mod) ||
                 !mod.TryGetItemComponent(out RepairableComponent component))
                 continue;
 
@@ -689,7 +806,7 @@ internal static class ApplySuppressorVolume
     {
         float multiplier = PartBalance.SuppressorGain(loss);
         float adjusted = volume * multiplier;
-        if (Wear.TryGetTestCondition(mod, out _) && LoggedAudioWeapons.Add(path + ":" + mod.Id))
+        if (loss > 0f && LoggedAudioPaths.Add(path))
             Plugin.Log.LogInfo($"[Audio] {path} {mod.Id}: wear {loss:P1}; volume {volume:0.000} -> {adjusted:0.000} (x{multiplier:0.000}).");
         return adjusted;
     }
@@ -702,7 +819,7 @@ internal static class PartKitPrice
     private static void Postfix(Item __2, ref double __result)
     {
         if (__2 is Mod mod && Wear.IsNativePart(mod))
-            __result *= 0.15;
+            __result *= ExtraParts.Decode(mod.RepairSpeed) == ExtraPart.None ? 0.15 : ExtraParts.KitCostFactor;
     }
 }
 
@@ -723,7 +840,8 @@ internal static class UseFirearmRepairParameters
     }
 
     private static bool IsFirearmOrPart(ItemTemplate template, string category) =>
-        (template is ModTemplate && template.RepairSpeed == Wear.RepairMarker) || template.IsChildOf(category);
+        (template is ModTemplate && (template.RepairSpeed == Wear.RepairMarker ||
+            ExtraParts.Decode(template.RepairSpeed) != ExtraPart.None)) || template.IsChildOf(category);
 }
 
 [HarmonyPatch(typeof(EFT.Repairing.RepairController), nameof(EFT.Repairing.RepairController.TryGetEnhancementChance))]
